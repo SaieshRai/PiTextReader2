@@ -5,13 +5,30 @@
 # Allows sight impaired person to have printed text read using
 # OCR and text-to-speech.
 #
-
+# Normally run by pi crontab at bootup
+# Turn off by commenting out @reboot... using $ crontab -e; sudo reboot
+# Manually run using $ python pitextreader.py
+#
+# This is a simplistic (i.e. not pretty) python program
+# Just runs cmd-line pgms raspistill, tesseract-ocr, flite to do all the work
+#
+# Version 1.0 2018.02.10 - initial release - rgrokett
+# v1.1 - added some text cleanup to improve reading
+# v1.2 - removed tabs
+# v1.3 - added image enhancement and orientation detection
+#
+# http://kd.grokett.com/
+#
+# License: GPLv3, see: www.gnu.org/licenses/gpl-3.0.html
+#
+ 
 import RPi.GPIO as GPIO
 import os, sys
 import logging
 import subprocess
 import threading
 import time 
+
 
 ##### USER VARIABLES
 DEBUG   = 0 # Debug 0/1 off/on (writes to debug.log)
@@ -20,12 +37,12 @@ VOLUME  = 90    # Audio volume
 
 # OTHER SETTINGS
 SOUNDS  = "/home/pi/PiTextReader/sounds/" # Directory for sound effect(s)
-# Replaced raspistill with libcamera-still
-CAMERA  = "libcamera-still --rotation 180 -t 500 -o /tmp/image.jpg"
+CAMERA  = "raspistill -cfx 128:128 --awb auto -rot 180 -t 500 -o /tmp/image.jpg"
 
 # GPIO BUTTONS
 BTN1    = 24    # The button!
 LED     = 18    # The button's LED!
+
 
 ### FUNCTIONS
 # Thread controls for background processing
@@ -92,14 +109,15 @@ def cleanText():
 def playTTS():
     logger.info('playTTS()') 
     global current_tts
-    current_tts = subprocess.Popen(['/usr/bin/flite', '-voice', 'awb', '-f', '/tmp/text.txt'],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, close_fds=True)
+    current_tts=subprocess.Popen(['/usr/bin/flite','-voice','awb','-f', '/tmp/text.txt'],
+        stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,close_fds=True)
     # Kick off stop audio thread 
     rt.start()
     # Wait until finished speaking (unless interrupted)
     current_tts.communicate()
     return
+
 
 # Stop TTS (with Interrupt)
 def stopTTS():
@@ -107,11 +125,12 @@ def stopTTS():
     # If button pressed, then stop audio
     if GPIO.input(BTN1) == GPIO.LOW:
         logger.info('stopTTS()') 
+        #current_tts.terminate()
         current_tts.kill()
         time.sleep(0.5)
     return 
 
-# GRAB IMAGE AND CONVERT
+# GRAB IMAGE AND CONVERT WITH ORIENTATION AND IMAGE ENHANCEMENT
 def getData():
     logger.info('getData()') 
     led(0) # Turn off Button LED
@@ -122,10 +141,15 @@ def getData():
     logger.info(cmd) 
     os.system(cmd)
 
-    # OCR to text
+    # Enhance image: adjust brightness/contrast and convert to grayscale
+    cmd = "convert /tmp/image.jpg -auto-level -contrast-stretch 5%x5% -sharpen 0x1 -monochrome /tmp/enhanced_image.jpg"
+    logger.info(cmd)
+    os.system(cmd)
+
+    # OCR with orientation detection using the enhanced image
     speak("now working. please wait.")
-    cmd = "/usr/bin/tesseract /tmp/image.jpg /tmp/text"
-    logger.info(cmd) 
+    cmd = "/usr/bin/tesseract /tmp/enhanced_image.jpg /tmp/text --psm 6 --oem 1 --osd"
+    logger.info(cmd)
     os.system(cmd)
     
     # Cleanup text
@@ -134,6 +158,7 @@ def getData():
     # Start reading text
     playTTS()
     return
+
 
 ######
 # MAIN
@@ -162,7 +187,8 @@ try:
     GPIO.setup(LED, GPIO.OUT) 
     
     # Threaded audio player
-    rt = RaspberryThread(function=stopTTS) # Stop Speaking text
+    #rt = RaspberryThread( function = repeatTTS ) # Repeat Speak text
+    rt = RaspberryThread( function = stopTTS ) # Stop Speaking text
     
     volume(VOLUME)
     speak("OK, ready")
@@ -170,10 +196,10 @@ try:
     
     while True:
         if GPIO.input(BTN1) == GPIO.LOW:
-            # Btn 1 pressed
+            # Btn 1
             getData()
             rt.stop()
-            rt = RaspberryThread(function=stopTTS) # Stop Speaking text
+            rt = RaspberryThread( function = stopTTS ) # Stop Speaking text
             led(1)
             time.sleep(0.5)  
             speak("OK, ready")
@@ -182,6 +208,5 @@ try:
 except KeyboardInterrupt:
     logger.info("exiting")
 
-GPIO.cleanup() # Reset GPIOs
+GPIO.cleanup() #Reset GPIOs
 sys.exit(0)
-
