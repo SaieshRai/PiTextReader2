@@ -12,6 +12,7 @@
 # Make sure python requirements are installed
 sudo apt-get update
 #sudo apt-get install -y build-essential python-pip python-dev 
+sudo apt-get install imagemagick
 
 echo  
 
@@ -20,7 +21,7 @@ sudo apt-get install -y tesseract-ocr flite
 
 
 # Verify Camera is configured
-X=`raspistill -o test.jpg 2>&1|grep Failed`
+X=`libstill -o test.jpg 2>&1|grep Failed`
 
 if [ -z "$X" ];
 then
