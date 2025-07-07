@@ -1,48 +1,23 @@
-#!/usr/bin/python
-# 
-# PiTextReader - Raspberry Pi Printed Text-to-Speech Reader
-#
-# Allows sight impaired person to have printed text read using
-# OCR and text-to-speech.
-#
-# Normally run by pi crontab at bootup
-# Turn off by commenting out @reboot... using $ crontab -e; sudo reboot
-# Manually run using $ python pitextreader.py
-#
-# This is a simplistic (i.e. not pretty) python program
-# Just runs cmd-line pgms raspistill, tesseract-ocr, flite to do all the work
-#
-# Version 1.0 2018.02.10 - initial release - rgrokett
-# v1.1 - added some text cleanup to improve reading
-# v1.2 - removed tabs
-# v1.3 - added image enhancement and orientation detection
-#
-# http://kd.grokett.com/
-#
-# License: GPLv3, see: www.gnu.org/licenses/gpl-3.0.html
-#
- 
 import RPi.GPIO as GPIO
 import os, sys
 import logging
 import subprocess
 import threading
-import time 
-
+import time
+import cv2
+import pytesseract
 
 ##### USER VARIABLES
-DEBUG   = 0 # Debug 0/1 off/on (writes to debug.log)
-SPEED   = 1.0   # Speech speed, 0.5 - 2.0 
-VOLUME  = 90    # Audio volume
+DEBUG   = 0  # Debug 0/1 off/on (writes to debug.log)
+SPEED   = 1.0  # Speech speed, 0.5 - 2.0
+VOLUME  = 90  # Audio volume
 
 # OTHER SETTINGS
-SOUNDS  = "/home/pi/PiTextReader/sounds/" # Directory for sound effect(s)
-CAMERA  = "raspistill -cfx 128:128 --awb auto -rot 180 -t 500 -o /tmp/image.jpg"
+SOUNDS  = "/home/pi/PiTextReader/sounds/"  # Directory for sound effect(s)
 
 # GPIO BUTTONS
-BTN1    = 24    # The button!
-LED     = 18    # The button's LED!
-
+BTN1    = 24  # The button!
+LED     = 18  # The button's LED!
 
 ### FUNCTIONS
 # Thread controls for background processing
@@ -61,104 +36,120 @@ class RaspberryThread(threading.Thread):
             self.function()
 
     def stop(self):
-        self.running = False 
+        self.running = False
 
 # LED ON/OFF
-def led(val):   
-    logger.info('led('+str(val)+')') 
+def led(val):  
+    logger.info('led('+str(val)+')')
     if val:
-       GPIO.output(LED,GPIO.HIGH)
+        GPIO.output(LED,GPIO.HIGH)
     else:
-       GPIO.output(LED,GPIO.LOW)
-    
+        GPIO.output(LED,GPIO.LOW)
+   
 # PLAY SOUND
-def sound(val): # Play a sound
-    logger.info('sound()') 
+def sound(val):  # Play a sound
+    logger.info('sound()')
     time.sleep(0.2)
     cmd = "/usr/bin/aplay -q "+str(val)
-    logger.info(cmd) 
+    logger.info(cmd)
     os.system(cmd)
     return
  
 # SPEAK STATUS
-def speak(val): # TTS Speak
-    logger.info('speak()') 
+def speak(val):  # TTS Speak
+    logger.info('speak()')
     cmd = "/usr/bin/flite -voice awb --setf duration_stretch="+str(SPEED)+" -t \""+str(val)+"\""
-    logger.info(cmd) 
+    logger.info(cmd)
     os.system(cmd)
-    return 
+    return
 
 # SET VOLUME
-def volume(val): # Set Volume for Launch
-    logger.info('volume('+str(val)+')') 
+def volume(val):  # Set Volume for Launch
+    logger.info('volume('+str(val)+')')
     vol = int(val)
     cmd = "sudo amixer -q sset PCM,0 "+str(vol)+"%"
-    logger.info(cmd) 
+    logger.info(cmd)
     os.system(cmd)
-    return 
+    return
 
 # TEXT CLEANUP
 def cleanText():
     logger.info('cleanText()')
     cmd = "sed -e 's/\([0-9]\)/& /g' -e 's/[[:punct:]]/ /g' -e 'G' -i /tmp/text.txt"
-    logger.info(cmd) 
+    logger.info(cmd)
     os.system(cmd)
     return
-    
+   
 # Play TTS (Allow Interrupt)
 def playTTS():
-    logger.info('playTTS()') 
+    logger.info('playTTS()')
     global current_tts
     current_tts=subprocess.Popen(['/usr/bin/flite','-voice','awb','-f', '/tmp/text.txt'],
         stdin=subprocess.PIPE,stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,close_fds=True)
-    # Kick off stop audio thread 
-    rt.start()
-    # Wait until finished speaking (unless interrupted)
-    current_tts.communicate()
+    rt.start()  # Kick off stop audio thread
+    current_tts.communicate()  # Wait until finished speaking (unless interrupted)
     return
-
 
 # Stop TTS (with Interrupt)
 def stopTTS():
     global current_tts
-    # If button pressed, then stop audio
     if GPIO.input(BTN1) == GPIO.LOW:
-        logger.info('stopTTS()') 
-        #current_tts.terminate()
-        current_tts.kill()
+        logger.info('stopTTS()')
+        current_tts.kill()  # Stop audio if button pressed
         time.sleep(0.5)
-    return 
-
-# GRAB IMAGE AND CONVERT WITH ORIENTATION AND IMAGE ENHANCEMENT
-def getData():
-    logger.info('getData()') 
-    led(0) # Turn off Button LED
-
-    # Take photo
-    sound(SOUNDS + "camera-shutter.wav")
-    cmd = CAMERA
-    logger.info(cmd) 
-    os.system(cmd)
-
-    # Enhance image: adjust brightness/contrast and convert to grayscale
-    cmd = "convert /tmp/image.jpg -auto-level -contrast-stretch 5%x5% -sharpen 0x1 -monochrome /tmp/enhanced_image.jpg"
-    logger.info(cmd)
-    os.system(cmd)
-
-    # OCR with orientation detection using the enhanced image
-    speak("now working. please wait.")
-    cmd = "/usr/bin/tesseract /tmp/enhanced_image.jpg /tmp/text --psm 6 --oem 1 --osd"
-    logger.info(cmd)
-    os.system(cmd)
-    
-    # Cleanup text
-    cleanText()
-
-    # Start reading text
-    playTTS()
     return
 
+# Capture Image with OpenCV and process it
+def capture_image():
+    logger.info('capture_image()')
+    # OpenCV capture from camera (0 for default camera)
+    cap = cv2.VideoCapture(0)
+    
+    # Check if camera opened successfully
+    if not cap.isOpened():
+        logger.error("Error: Could not open camera.")
+        return
+    
+    # Capture a single frame
+    ret, frame = cap.read()
+    
+    # Release the camera
+    cap.release()
+    
+    if ret:
+        # Convert to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Apply thresholding
+        _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Save the processed image temporarily
+        cv2.imwrite('/tmp/image.jpg', thresh)
+        return '/tmp/image.jpg'
+    else:
+        logger.error("Error: Could not capture image.")
+        return None
+
+# Perform OCR on captured image
+def getData():
+    image_path = capture_image()  # Capture image and get its path
+    if image_path:
+        logger.info('Performing OCR on image...')
+        # Use pytesseract to extract text
+        text = pytesseract.image_to_string(image_path)
+        
+        # Save extracted text to a file
+        with open('/tmp/text.txt', 'w') as f:
+            f.write(text)
+        
+        logger.info(f"Extracted Text: {text}")
+        
+        # Clean up the text file for better speech output
+        cleanText()
+        playTTS()  # Play the text as speech
+    else:
+        speak("Error capturing image")
 
 ######
 # MAIN
@@ -177,36 +168,35 @@ try:
     log_format = '%(asctime)-6s: %(name)s - %(levelname)s - %(message)s'
     handler.setFormatter(logging.Formatter(log_format))
     logger.addHandler(handler)
-    logger.info('Starting') 
-    
+    logger.info('Starting')
+   
     # Setup GPIO buttons
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
      
-    GPIO.setup(BTN1, GPIO.IN, pull_up_down=GPIO.PUD_UP) 
-    GPIO.setup(LED, GPIO.OUT) 
-    
+    GPIO.setup(BTN1, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(LED, GPIO.OUT)
+   
     # Threaded audio player
-    #rt = RaspberryThread( function = repeatTTS ) # Repeat Speak text
-    rt = RaspberryThread( function = stopTTS ) # Stop Speaking text
-    
+    rt = RaspberryThread(function=stopTTS)  # Stop Speaking text
+   
     volume(VOLUME)
     speak("OK, ready")
     led(1)
-    
+   
     while True:
         if GPIO.input(BTN1) == GPIO.LOW:
-            # Btn 1
+            # Btn 1 Pressed
             getData()
             rt.stop()
-            rt = RaspberryThread( function = stopTTS ) # Stop Speaking text
+            rt = RaspberryThread(function=stopTTS)  # Stop Speaking text
             led(1)
-            time.sleep(0.5)  
+            time.sleep(0.5)
             speak("OK, ready")
-        time.sleep(0.2)  
-    
+        time.sleep(0.2)
+   
 except KeyboardInterrupt:
     logger.info("exiting")
 
-GPIO.cleanup() #Reset GPIOs
+GPIO.cleanup()  # Reset GPIOs
 sys.exit(0)
