@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 import RPi.GPIO as GPIO
 import os, sys
 import logging
@@ -5,22 +7,15 @@ import subprocess
 import threading
 import time
 import cv2
-import pytesseract
+import numpy as np
 
-##### USER VARIABLES
-DEBUG   = 0  # Debug 0/1 off/on (writes to debug.log)
-SPEED   = 1.0  # Speech speed, 0.5 - 2.0
-VOLUME  = 90  # Audio volume
+DEBUG   = 1
+SPEED   = 1.0
+VOLUME  = 100
+SOUNDS  = "/home/pi/PiTextReader/sounds/"
+BTN1    = 24
+LED     = 18
 
-# OTHER SETTINGS
-SOUNDS  = "/home/pi/PiTextReader/sounds/"  # Directory for sound effect(s)
-
-# GPIO BUTTONS
-BTN1    = 24  # The button!
-LED     = 18  # The button's LED!
-
-### FUNCTIONS
-# Thread controls for background processing
 class RaspberryThread(threading.Thread):
     def __init__(self, function):
         self.running = False
@@ -36,127 +31,133 @@ class RaspberryThread(threading.Thread):
             self.function()
 
     def stop(self):
-        self.running = False
+        self.running = False 
 
-# LED ON/OFF
-def led(val):  
-    logger.info('led('+str(val)+')')
+def led(val):   
+    logger.info('led('+str(val)+')') 
     if val:
-        GPIO.output(LED,GPIO.HIGH)
+        GPIO.output(LED, GPIO.HIGH)
     else:
-        GPIO.output(LED,GPIO.LOW)
-   
-# PLAY SOUND
-def sound(val):  # Play a sound
-    logger.info('sound()')
+        GPIO.output(LED, GPIO.LOW)
+    
+def sound(val):
+    logger.info('sound()') 
     time.sleep(0.2)
     cmd = "/usr/bin/aplay -q "+str(val)
-    logger.info(cmd)
+    logger.info(cmd) 
     os.system(cmd)
     return
  
-# SPEAK STATUS
-def speak(val):  # TTS Speak
-    logger.info('speak()')
+def speak(val):
+    logger.info('speak()') 
     cmd = "/usr/bin/flite -voice awb --setf duration_stretch="+str(SPEED)+" -t \""+str(val)+"\""
-    logger.info(cmd)
+    logger.info(cmd) 
     os.system(cmd)
-    return
+    return 
 
-# SET VOLUME
-def volume(val):  # Set Volume for Launch
-    logger.info('volume('+str(val)+')')
+def volume(val):
+    logger.info('volume('+str(val)+')') 
     vol = int(val)
     cmd = "sudo amixer -q sset PCM,0 "+str(vol)+"%"
-    logger.info(cmd)
+    logger.info(cmd) 
     os.system(cmd)
-    return
+    return 
 
-# TEXT CLEANUP
 def cleanText():
     logger.info('cleanText()')
     cmd = "sed -e 's/\([0-9]\)/& /g' -e 's/[[:punct:]]/ /g' -e 'G' -i /tmp/text.txt"
-    logger.info(cmd)
+    logger.info(cmd) 
     os.system(cmd)
     return
-   
-# Play TTS (Allow Interrupt)
+    
 def playTTS():
-    logger.info('playTTS()')
+    logger.info('playTTS()') 
     global current_tts
-    current_tts=subprocess.Popen(['/usr/bin/flite','-voice','awb','-f', '/tmp/text.txt'],
-        stdin=subprocess.PIPE,stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,close_fds=True)
-    rt.start()  # Kick off stop audio thread
-    current_tts.communicate()  # Wait until finished speaking (unless interrupted)
+    if not os.path.exists('/tmp/text.txt'):
+        logger.error("Text file does not exist!")
+        speak("Sorry, I could not read the text.")
+        return
+    with open('/tmp/text.txt', 'r') as f:
+        text = f.read().strip()
+    if len(text) == 0:
+        logger.error("No text found in OCR result!")
+        speak("Sorry, no readable text was found.")
+        return
+    current_tts = subprocess.Popen(['/usr/bin/flite', '-voice', 'awb', '-f', '/tmp/text.txt'],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, close_fds=True)
+    rt.start()
+    current_tts.communicate()
     return
 
-# Stop TTS (with Interrupt)
 def stopTTS():
     global current_tts
     if GPIO.input(BTN1) == GPIO.LOW:
-        logger.info('stopTTS()')
-        current_tts.kill()  # Stop audio if button pressed
+        logger.info('stopTTS()') 
+        current_tts.kill()
         time.sleep(0.5)
+    return 
+
+def correct_orientation(image_path):
+    logger.info('correct_orientation()')
+    orientation_cmd = f"/usr/bin/tesseract {image_path} stdout --psm 0 -c min_characters_to_try=5"
+    logger.info(f"Running orientation command: {orientation_cmd}")
+    process = subprocess.Popen(orientation_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        logger.error(f"Error detecting orientation: {stderr.decode('utf-8')}")
+        return image_path
+    output = stdout.decode('utf-8')
+    logger.info(f"Tesseract orientation output: {output}")
+    if "Rotate: 90" in output:
+        angle = 90
+    elif "Rotate: 180" in output:
+        angle = 180
+    elif "Rotate: 270" in output:
+        angle = 270
+    else:
+        angle = 0
+    img = cv2.imread(image_path)
+    if angle != 0:
+        (h, w) = img.shape[:2]
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+        rotated_img = cv2.warpAffine(img, M, (w, h))
+        corrected_image_path = '/tmp/corrected_image.jpg'
+        cv2.imwrite(corrected_image_path, rotated_img)
+        logger.info(f"Image rotated by {angle} degrees.")
+        return corrected_image_path
+    else:
+        logger.info("No rotation needed.")
+        return image_path
+
+def getData():
+    logger.info('getData()') 
+    led(0)
+    sound(SOUNDS + "camera-shutter.wav")
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    ret, frame = cap.read()
+    if ret:
+        image_path = '/tmp/image.jpg'
+        cv2.imwrite(image_path, frame)
+    cap.release()
+    logger.info("Image captured and saved.")
+    corrected_image_path = correct_orientation(image_path)
+    speak("Now working. Please wait.")
+    cmd = f"/usr/bin/tesseract {corrected_image_path} /tmp/text"
+    logger.info(f"Running OCR command: {cmd}")
+    os.system(cmd)
+    if not os.path.exists("/tmp/text.txt"):
+        logger.error("OCR failed, text file not found!")
+        speak("Sorry, I could not read the text.")
+        return
+    cleanText()
+    playTTS()
     return
 
-# Capture Image with OpenCV and process it
-def capture_image():
-    logger.info('capture_image()')
-    # OpenCV capture from camera (0 for default camera)
-    cap = cv2.VideoCapture(0)
-    
-    # Check if camera opened successfully
-    if not cap.isOpened():
-        logger.error("Error: Could not open camera.")
-        return
-    
-    # Capture a single frame
-    ret, frame = cap.read()
-    
-    # Release the camera
-    cap.release()
-    
-    if ret:
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Apply thresholding
-        _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        # Save the processed image temporarily
-        cv2.imwrite('/tmp/image.jpg', thresh)
-        return '/tmp/image.jpg'
-    else:
-        logger.error("Error: Could not capture image.")
-        return None
-
-# Perform OCR on captured image
-def getData():
-    image_path = capture_image()  # Capture image and get its path
-    if image_path:
-        logger.info('Performing OCR on image...')
-        # Use pytesseract to extract text
-        text = pytesseract.image_to_string(image_path)
-        
-        # Save extracted text to a file
-        with open('/tmp/text.txt', 'w') as f:
-            f.write(text)
-        
-        logger.info(f"Extracted Text: {text}")
-        
-        # Clean up the text file for better speech output
-        cleanText()
-        playTTS()  # Play the text as speech
-    else:
-        speak("Error capturing image")
-
-######
-# MAIN
-######
 try:
     global rt
-    # Setup Logging
     logger = logging.getLogger()
     handler = logging.FileHandler('debug.log')
     if DEBUG:
@@ -168,35 +169,27 @@ try:
     log_format = '%(asctime)-6s: %(name)s - %(levelname)s - %(message)s'
     handler.setFormatter(logging.Formatter(log_format))
     logger.addHandler(handler)
-    logger.info('Starting')
-   
-    # Setup GPIO buttons
+    logger.info('Starting') 
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
-     
-    GPIO.setup(BTN1, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(LED, GPIO.OUT)
-   
-    # Threaded audio player
-    rt = RaspberryThread(function=stopTTS)  # Stop Speaking text
-   
+    GPIO.setup(BTN1, GPIO.IN, pull_up_down=GPIO.PUD_UP) 
+    GPIO.setup(LED, GPIO.OUT) 
+    rt = RaspberryThread(function=stopTTS)
     volume(VOLUME)
     speak("OK, ready")
     led(1)
-   
     while True:
         if GPIO.input(BTN1) == GPIO.LOW:
-            # Btn 1 Pressed
             getData()
             rt.stop()
-            rt = RaspberryThread(function=stopTTS)  # Stop Speaking text
+            rt = RaspberryThread(function=stopTTS)
             led(1)
-            time.sleep(0.5)
+            time.sleep(0.5)  
             speak("OK, ready")
-        time.sleep(0.2)
-   
+        time.sleep(0.2)  
+    
 except KeyboardInterrupt:
-    logger.info("exiting")
+    logger.info("Exiting.")
 
-GPIO.cleanup()  # Reset GPIOs
+GPIO.cleanup()
 sys.exit(0)
